@@ -1,15 +1,18 @@
 """
 Main window for the MP3 Tag Editor application
 """
+import os
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QPushButton, QTableWidget, QTableWidgetItem, 
                             QFileDialog, QMessageBox, QLabel, QHeaderView,
                             QCheckBox, QSpinBox, QProgressBar, QMenuBar, QMenu)
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtGui import QIcon, QAction, QColor
 from tag_processor.processor import TagProcessor
 from utils.file_utils import get_music_folder, get_sample_mp3_files
+from utils.config import load_config, save_config, get_config_value, set_config_value
 from gui.about_dialog import AboutDialog
+from gui.settings_dialog import SettingsDialog
 
 class MainWindow(QMainWindow):
     """Main window for the MP3 Tag Editor application"""
@@ -17,7 +20,14 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MP3 Tag Editor")
-        self.setMinimumSize(800, 600)
+        
+        # Load configuration
+        self.config = load_config()
+        
+        # Set window size from config
+        width = self.config.get("window_width", 800)
+        height = self.config.get("window_height", 600)
+        self.resize(width, height)
         
         self.tag_processor = TagProcessor()
         self.mp3_files = []
@@ -65,11 +75,11 @@ class MainWindow(QMainWindow):
         self.sample_size_spin = QSpinBox()
         self.sample_size_spin.setMinimum(1)
         self.sample_size_spin.setMaximum(100)
-        self.sample_size_spin.setValue(10)
+        self.sample_size_spin.setValue(self.config.get("sample_size", 10))
         sample_options_layout.addWidget(self.sample_size_spin)
         
         self.recursive_checkbox = QCheckBox("Search recursively")
-        self.recursive_checkbox.setChecked(True)
+        self.recursive_checkbox.setChecked(self.config.get("recursive_search", True))
         sample_options_layout.addWidget(self.recursive_checkbox)
         
         sample_options_layout.addStretch()
@@ -87,8 +97,8 @@ class MainWindow(QMainWindow):
         
         # Table for displaying MP3 files and their tags
         self.files_table = QTableWidget()
-        self.files_table.setColumnCount(6)
-        self.files_table.setHorizontalHeaderLabels(["Filename", "Title", "Artist", "Album", "Year", "Genre"])
+        self.files_table.setColumnCount(7)
+        self.files_table.setHorizontalHeaderLabels(["Filename", "Title", "Artist", "Album", "Year", "Genre", "Track#"])
         self.files_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         
         # Make cells editable except for the filename column
@@ -116,6 +126,13 @@ class MainWindow(QMainWindow):
         sample_action.setShortcut("Ctrl+S")
         sample_action.triggered.connect(self.sample_mp3_files)
         file_menu.addAction(sample_action)
+        
+        file_menu.addSeparator()
+        
+        # Settings action
+        settings_action = QAction("Se&ttings", self)
+        settings_action.triggered.connect(self.show_settings_dialog)
+        file_menu.addAction(settings_action)
         
         file_menu.addSeparator()
         
@@ -153,20 +170,53 @@ class MainWindow(QMainWindow):
         dialog = AboutDialog(self)
         dialog.exec()
     
+    def show_settings_dialog(self):
+        """Show the settings dialog"""
+        dialog = SettingsDialog(self)
+        if dialog.exec():
+            # Reload configuration
+            self.config = load_config()
+            
+            # Update UI with new configuration
+            self.sample_size_spin.setValue(self.config.get("sample_size", 10))
+            self.recursive_checkbox.setChecked(self.config.get("recursive_search", True))
+    
+    def closeEvent(self, event):
+        """Handle window close event"""
+        # Save window size
+        self.config["window_width"] = self.width()
+        self.config["window_height"] = self.height()
+        save_config(self.config)
+        
+        event.accept()
+    
     def load_mp3_files(self):
         """Load MP3 files from the user's music folder"""
         file_dialog = QFileDialog()
         file_dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
         file_dialog.setNameFilter("MP3 files (*.mp3)")
         
-        # Start in the music folder
-        file_dialog.setDirectory(get_music_folder())
+        # Start in the last used directory or music folder
+        last_dir = self.config.get("last_directory", "")
+        start_dir = last_dir if last_dir and os.path.isdir(last_dir) else get_music_folder()
+        file_dialog.setDirectory(start_dir)
         
         if file_dialog.exec():
             self.mp3_files = file_dialog.selectedFiles()
+            
+            # Save the last directory
+            if self.mp3_files:
+                last_dir = os.path.dirname(self.mp3_files[0])
+                self.config["last_directory"] = last_dir
+                save_config(self.config)
+            
             self.status_label.setText(f"Loaded {len(self.mp3_files)} MP3 files.")
             self.process_button.setEnabled(True)
             self.display_files()
+            
+            # Auto-process if enabled
+            if self.config.get("auto_process", False):
+                self.process_tags()
     
     def sample_mp3_files(self):
         """Sample MP3 files from the user's music folder"""
@@ -180,9 +230,14 @@ class MainWindow(QMainWindow):
             )
             return
         
-        # Get sample size and recursive option
+        # Get sample size and recursive option from UI (which is synced with config)
         sample_size = self.sample_size_spin.value()
         recursive = self.recursive_checkbox.isChecked()
+        
+        # Update config with current values
+        self.config["sample_size"] = sample_size
+        self.config["recursive_search"] = recursive
+        save_config(self.config)
         
         # Get sample MP3 files
         self.mp3_files = get_sample_mp3_files(music_folder, sample_size, recursive)
@@ -198,6 +253,10 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"Sampled {len(self.mp3_files)} MP3 files from {music_folder}.")
         self.process_button.setEnabled(True)
         self.display_files()
+        
+        # Auto-process if enabled
+        if self.config.get("auto_process", False):
+            self.process_tags()
     
     def display_files(self):
         """Display the loaded MP3 files in the table"""
@@ -214,7 +273,7 @@ class MainWindow(QMainWindow):
             self.files_table.setItem(row, 0, filename_item)
             
             # Other columns will be filled after processing
-            for col in range(1, 6):
+            for col in range(1, 7):
                 self.files_table.setItem(row, col, QTableWidgetItem(""))
         
         # Reconnect the itemChanged signal
@@ -243,11 +302,12 @@ class MainWindow(QMainWindow):
                 
                 # Update table with tag information
                 if tag_info:
-                    self.files_table.setItem(row, 1, QTableWidgetItem(tag_info.get("title", "")))
-                    self.files_table.setItem(row, 2, QTableWidgetItem(tag_info.get("artist", "")))
-                    self.files_table.setItem(row, 3, QTableWidgetItem(tag_info.get("album", "")))
-                    self.files_table.setItem(row, 4, QTableWidgetItem(str(tag_info.get("year", ""))))
-                    self.files_table.setItem(row, 5, QTableWidgetItem(tag_info.get("genre", "")))
+                    self.update_table_cell(row, 1, tag_info.get("title", ""))
+                    self.update_table_cell(row, 2, tag_info.get("artist", ""))
+                    self.update_table_cell(row, 3, tag_info.get("album", ""))
+                    self.update_table_cell(row, 4, str(tag_info.get("year", "")))
+                    self.update_table_cell(row, 5, tag_info.get("genre", ""))
+                    self.update_table_cell(row, 6, tag_info.get("track", ""))
             except Exception as e:
                 print(f"Error processing {file_path}: {e}")
             
@@ -259,7 +319,21 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"Processed {len(self.mp3_files)} files. You can edit tags directly in the table. Click 'Save Changes' to apply.")
         self.save_button.setEnabled(True)
         self.progress_bar.setVisible(False)
-    
+
+    def update_table_cell(self, row, col, new_value):
+        """Update a table cell and highlight it if the value has changed"""
+        item = self.files_table.item(row, col)
+        if item is None:
+            item = QTableWidgetItem()
+            self.files_table.setItem(row, col, item)
+        
+        # Check if the value has changed
+        if item.text() != new_value:
+            item.setText(new_value)
+            item.setBackground(QColor("yellow"))  # Highlight changed cells
+        else:
+            item.setBackground(QColor("white"))  # Reset background for unchanged cells
+
     def on_table_item_changed(self, item):
         """Handle changes to table items"""
         row = item.row()
@@ -274,7 +348,7 @@ class MainWindow(QMainWindow):
             return
         
         # Update the processed data with the new value
-        tag_keys = ["title", "artist", "album", "year", "genre"]
+        tag_keys = ["title", "artist", "album", "year", "genre", "track"]
         tag_key = tag_keys[col - 1]  # Adjust for filename column
         
         self.processed_data[file_path][tag_key] = item.text()
